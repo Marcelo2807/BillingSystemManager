@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -19,26 +20,61 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useUnits } from "@/hooks/use-units";
+import { useConsumers } from "@/hooks/use-consumers";
+import { usePlants } from "@/hooks/use-plants";
 
 export default function Units() {
   const [searchTerm, setSearchTerm] = useState("");
-  const [distributor, setDistributor] = useState("all");
+  const [distributorFilter, setDistributorFilter] = useState("all");
 
-  const mockUnits = Array.from({ length: 15 }, (_, i) => ({
-    id: `unit-${i + 1}`,
-    ucNumber: `${String(i + 1000).padStart(10, '0')}`,
-    consumerName: `Consumidor ${i + 1}`,
-    distributor: ["CPFL", "EDP", "Enel", "Light"][i % 4],
-    city: ["São Paulo", "Rio de Janeiro", "Belo Horizonte", "Curitiba"][i % 4],
-    state: ["SP", "RJ", "MG", "PR"][i % 4],
-  }));
+  const { units, isLoading } = useUnits();
+  const { consumers } = useConsumers();
+  const { plants } = usePlants();
 
-  const filteredUnits = mockUnits.filter((unit) => {
-    const matchesSearch = unit.ucNumber.includes(searchTerm) || 
-                         unit.consumerName.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesDistributor = distributor === "all" || unit.distributor === distributor;
-    return matchesSearch && matchesDistributor;
-  });
+  // Criar mapa de consumidores e plantas para lookup rápido
+  const consumerMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    consumers.forEach(c => map[c.id] = c.name);
+    return map;
+  }, [consumers]);
+
+  const plantMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    plants.forEach(p => map[p.id] = p.name);
+    return map;
+  }, [plants]);
+
+  // Obter lista única de distribuidoras
+  const distributors = useMemo(() => {
+    const unique = new Set(units.map(u => u.distributor));
+    return Array.from(unique).sort();
+  }, [units]);
+
+  const filteredUnits = useMemo(() => {
+    return units.filter((unit) => {
+      const matchesSearch =
+        unit.ucNumber.includes(searchTerm) ||
+        consumerMap[unit.consumerId || '']?.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesDistributor =
+        distributorFilter === "all" || unit.distributor === distributorFilter;
+      return matchesSearch && matchesDistributor;
+    });
+  }, [units, searchTerm, distributorFilter, consumerMap]);
+
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Unidades Consumidoras</h1>
+          <p className="text-sm text-muted-foreground">
+            Gerencie as unidades consumidoras
+          </p>
+        </div>
+        <Skeleton className="h-96" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -57,7 +93,7 @@ export default function Units() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Lista de Unidades</CardTitle>
+          <CardTitle>Lista de Unidades ({filteredUnits.length})</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
@@ -71,16 +107,17 @@ export default function Units() {
                 data-testid="input-search-units"
               />
             </div>
-            <Select value={distributor} onValueChange={setDistributor}>
+            <Select value={distributorFilter} onValueChange={setDistributorFilter}>
               <SelectTrigger className="w-full md:w-48" data-testid="select-distributor">
                 <SelectValue placeholder="Distribuidora" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Todas</SelectItem>
-                <SelectItem value="CPFL">CPFL</SelectItem>
-                <SelectItem value="EDP">EDP</SelectItem>
-                <SelectItem value="Enel">Enel</SelectItem>
-                <SelectItem value="Light">Light</SelectItem>
+                {distributors.map((d) => (
+                  <SelectItem key={d} value={d}>
+                    {d}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -92,26 +129,32 @@ export default function Units() {
                   <TableHead className="text-xs font-medium uppercase tracking-wide">UC</TableHead>
                   <TableHead className="text-xs font-medium uppercase tracking-wide">Consumidor</TableHead>
                   <TableHead className="text-xs font-medium uppercase tracking-wide">Distribuidora</TableHead>
-                  <TableHead className="text-xs font-medium uppercase tracking-wide">Cidade</TableHead>
-                  <TableHead className="text-xs font-medium uppercase tracking-wide">UF</TableHead>
+                  <TableHead className="text-xs font-medium uppercase tracking-wide">Usina</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredUnits.map((unit) => (
-                  <TableRow
-                    key={unit.id}
-                    className="hover-elevate cursor-pointer"
-                    data-testid={`row-unit-${unit.id}`}
-                  >
-                    <TableCell className="font-mono text-sm font-medium">{unit.ucNumber}</TableCell>
-                    <TableCell>{unit.consumerName}</TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{unit.distributor}</Badge>
+                {filteredUnits.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center text-muted-foreground">
+                      {searchTerm ? 'Nenhuma unidade encontrada' : 'Nenhuma unidade cadastrada'}
                     </TableCell>
-                    <TableCell className="text-sm">{unit.city}</TableCell>
-                    <TableCell className="font-mono text-sm">{unit.state}</TableCell>
                   </TableRow>
-                ))}
+                ) : (
+                  filteredUnits.map((unit) => (
+                    <TableRow
+                      key={unit.id}
+                      className="hover-elevate cursor-pointer"
+                      data-testid={`row-unit-${unit.id}`}
+                    >
+                      <TableCell className="font-mono text-sm font-medium">{unit.ucNumber}</TableCell>
+                      <TableCell>{consumerMap[unit.consumerId || ''] || '-'}</TableCell>
+                      <TableCell>
+                        <Badge variant="secondary">{unit.distributor}</Badge>
+                      </TableCell>
+                      <TableCell className="text-sm">{plantMap[unit.plantId || ''] || '-'}</TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </div>
