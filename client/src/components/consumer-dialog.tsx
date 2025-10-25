@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -7,7 +7,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -20,21 +19,27 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Plus } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
+import { useConsumers } from "@/hooks/use-consumers";
+import type { Consumer } from "@shared/schema";
 
 const consumerSchema = z.object({
   name: z.string().min(1, "Nome é obrigatório"),
-  document: z.string().min(11, "CPF/CNPJ inválido"),
+  document: z.string().min(11, "CPF/CNPJ inválido").optional().or(z.literal("")),
   email: z.string().email("Email inválido").optional().or(z.literal("")),
   phone: z.string().optional(),
 });
 
 type ConsumerForm = z.infer<typeof consumerSchema>;
 
-export function ConsumerDialog() {
-  const [open, setOpen] = useState(false);
-  const { toast } = useToast();
+interface ConsumerDialogProps {
+  consumer?: Consumer | null;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+export function ConsumerDialog({ consumer, open, onOpenChange }: ConsumerDialogProps) {
+  const { create, update, isCreating, isUpdating } = useConsumers();
+  const isEditing = !!consumer;
 
   const form = useForm<ConsumerForm>({
     resolver: zodResolver(consumerSchema),
@@ -46,27 +51,46 @@ export function ConsumerDialog() {
     },
   });
 
-  const onSubmit = (data: ConsumerForm) => {
-    console.log("Consumer created:", data);
-    toast({
-      title: "Consumidor criado",
-      description: `${data.name} foi adicionado com sucesso`,
-    });
-    setOpen(false);
-    form.reset();
+  // Reset form quando o consumer mudar
+  useEffect(() => {
+    if (consumer) {
+      form.reset({
+        name: consumer.name,
+        document: consumer.document || "",
+        email: consumer.email || "",
+        phone: consumer.phone || "",
+      });
+    } else {
+      form.reset({
+        name: "",
+        document: "",
+        email: "",
+        phone: "",
+      });
+    }
+  }, [consumer, form]);
+
+  const onSubmit = async (data: ConsumerForm) => {
+    try {
+      if (isEditing) {
+        await update({ id: consumer.id, data });
+      } else {
+        await create(data);
+      }
+      onOpenChange?.(false);
+      form.reset();
+    } catch (error) {
+      console.error('Error saving consumer:', error);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button data-testid="button-add-consumer">
-          <Plus className="h-4 w-4" />
-          Novo Consumidor
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Novo Consumidor</DialogTitle>
+          <DialogTitle>
+            {isEditing ? 'Editar Consumidor' : 'Novo Consumidor'}
+          </DialogTitle>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -88,7 +112,7 @@ export function ConsumerDialog() {
               name="document"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>CPF/CNPJ *</FormLabel>
+                  <FormLabel>CPF/CNPJ</FormLabel>
                   <FormControl>
                     <Input placeholder="000.000.000-00" {...field} data-testid="input-consumer-document" />
                   </FormControl>
@@ -123,10 +147,20 @@ export function ConsumerDialog() {
               )}
             />
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange?.(false)}
+              >
                 Cancelar
               </Button>
-              <Button type="submit" data-testid="button-submit-consumer">Salvar</Button>
+              <Button
+                type="submit"
+                data-testid="button-submit-consumer"
+                disabled={isCreating || isUpdating}
+              >
+                {isCreating || isUpdating ? 'Salvando...' : 'Salvar'}
+              </Button>
             </DialogFooter>
           </form>
         </Form>
