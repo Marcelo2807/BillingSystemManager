@@ -1,0 +1,976 @@
+📊 SISTEMA DE GESTÃO DE FATURAMENTO PRÓ ENERGIA
+🎯 Visão Geral
+Sistema profissional completo para gestão de faturamento de energia solar, com processamento inteligente de documentos usando IA, gerenciamento de consumidores, unidades consumidoras, usinas solares e envio automatizado de faturas por email.
+🏗️ Arquitetura Tecnológica
+Frontend
+Framework: React 18.3.1 + TypeScript
+Build Tool: Vite
+Routing: React Router DOM v6.30.1
+UI Components: Radix UI + shadcn/ui
+Styling: Tailwind CSS + tailwindcss-animate
+State Management: TanStack Query (React Query) v5.83.0
+Forms: React Hook Form + Zod validation
+Charts: Recharts v2.15.4
+Export: jsPDF + XLSX
+Backend
+BaaS: Supabase (Lovable Cloud)
+Database: PostgreSQL
+Storage: Supabase Storage (3 buckets)
+Edge Functions: Deno (8 functions)
+Auth: Supabase Auth
+IA & Integrations
+Lovable AI: Google Gemini 2.5 Flash (extração de faturas)
+OpenAI: GPT-4o-mini (processamento genérico de documentos)
+Email: Resend (envio transacional)
+📁 Estrutura do Banco de Dados
+Tabelas Principais (10 tabelas)
+-- Cadastros Básicos
+├── consumers (consumidores)
+│ ├── id, name, email, phone, document
+│ └── RLS: owner_can_* policies
+│
+├── units (unidades consumidoras)
+│ ├── id, uc_number, distributor, consumer_id, plant_id
+│ └── Relacionamento: N:1 com consumers e plants
+│
+├── plants (usinas solares)
+│ ├── id, name, cnpj, city, state
+│ └── RLS: owner_can_* policies
+│
+-- Faturamento
+├── invoices (faturas)
+│ ├── id, type (distributor|proprietary)
+│ ├── storage_path, sha256, status, parsed (JSONB)
+│ ├── amount_total, due_date, kwh_compensated
+│ └── reference_month, reference_year
+│
+├── billing_records (registros de cobrança)
+│ ├── id, invoice_id, consumer_id, status
+│ ├── asaas_customer_id, asaas_payment_id
+│ └── pix_payload, pix_base64
+│
+-- Rateios e Performance
+├── apportionments (rateios)
+│ ├── id, plant_id, unit_id, percent
+│ └── valid_from, valid_to
+│
+├── performance_records (rendimento)
+│ ├── energy_consumed, energy_compensated
+│ ├── billing, consumer_savings
+│ └── reference_month
+│
+-- IA & Documentos
+├── documents (documentos genéricos)
+│ ├── id, bucket, path, processing
+│ └── uploaded_by, size_bytes
+│
+├── document_extractions (extrações de IA)
+│ ├── id, document_id, doc_type
+│ ├── json_data (JSONB), confidence
+│ └── RLS: all_* policies
+│
+-- Email & Templates
+├── email_history (histórico de emails)
+│ ├── id, to_email, subject, status
+│ ├── attachments (JSONB), html_preview
+│ └── provider_message_id
+│
+└── email_templates (templates de email)
+├── id, slug, html, schema_version
+└── RLS: templates_readable/writable
+Storage Buckets
+invoices (privado) → Faturas de energia
+generated-invoices (privado) → PDFs gerados
+documents (privado) → Documentos genéricos processados por IA
+🚀 Funcionalidades Principais
+Dashboard 📊
+Rota: /
+Código:
+// src/pages/Dashboard.tsx
+const Dashboard = () => {
+const { data: billingRecords } = useQuery({
+queryKey: ["billing-records-dashboard"],
+queryFn: async () => {
+const { data } = await supabase
+.from("billing_records")
+.select(id, created_at, status, invoice:invoices(due_date, amount_total, unit:units(uc_number)), consumer:consumers(document))
+.order("created_at", { ascending: false })
+.limit(50);
+return data;
+},
+staleTime: 30000, // Cache 30s
+});
+return (
+<div>
+<StatsCard title="Total de Consumidores" value={totalConsumers} icon={Users} />
+<StatsCard title="Unidades Consumidoras" value={totalUnits} icon={Building2} />
+<StatsCard title="Faturas do Mês" value={billingsThisMonth} icon={FileText} />
+<StatsCard title="Total a Receber" value={formatCurrency(totalReceivable)} icon={DollarSign} />
+code
+Code
+<AlertsSection type="overdue" billings={overdueBillings} />
+  <AlertsSection type="upcoming" billings={upcomingBillings} />
+  
+  <RecentBillingTable billings={records} />
+</div>
+);
+};
+Features:
+✅ Cards com métricas principais (consumidores, unidades, faturas, valor a receber)
+✅ Alertas de faturas vencidas e próximas do vencimento
+✅ Tabela de faturas recentes
+✅ Cache inteligente (30s) com React Query
+2. Gestão de Consumidores 👥
+Rota: /consumers
+Código:
+// src/pages/Consumers.tsx + src/hooks/useConsumers.ts
+export function useConsumers() {
+const { data: consumers, isLoading } = useQuery({
+queryKey: ["consumers"],
+queryFn: async () => {
+const { data, error } = await supabase
+.from("consumers")
+.select("*")
+.order("name");
+if (error) throw error;
+return data;
+},
+staleTime: 120000, // Cache 2min
+retry: 2, // Retry automático
+});
+const createMutation = useMutation({
+mutationFn: async (newConsumer: any) => {
+const { data } = await supabase
+.from("consumers")
+.insert(newConsumer)
+.select()
+.single();
+return data;
+},
+onSuccess: () => {
+queryClient.invalidateQueries({ queryKey: ["consumers"] });
+toast({ title: "Consumidor criado com sucesso!" });
+},
+});
+return { consumers, isLoading, create: createMutation.mutate };
+}
+Features:
+✅ CRUD completo de consumidores
+✅ Busca por nome, CPF/CNPJ, email
+✅ Ordenação dinâmica (nome, email)
+✅ Paginação (20 itens/página)
+✅ Badge mostrando quantidade de unidades consumidoras
+✅ Dialog de criação/edição com validação
+3. Unidades Consumidoras 🏢
+Rota: /units
+Código:
+// src/pages/Units.tsx
+const Units = () => {
+const { units } = useUnits();
+const { consumers } = useConsumers();
+const filteredUnits = units.filter((unit) => {
+const matchesSearch = unit.uc_number.includes(searchTerm);
+const matchesCompany = selectedCompanies.length === 0 ||
+selectedCompanies.includes(unit.distributor);
+return matchesSearch && matchesCompany;
+});
+return (
+<div>
+<UnitsFilters
+selectedCompanies={selectedCompanies}
+onCompaniesChange={setSelectedCompanies}
+allCompanies={uniqueCompanies}
+/>
+code
+Code
+<Table>
+    <TableBody>
+      {paginatedUnits.map((unit) => (
+        <TableRow onClick={() => navigate(`/units/${unit.id}`)}>
+          <TableCell>{unit.uc_number}</TableCell>
+          <TableCell>{getConsumerName(unit.consumer_id)}</TableCell>
+          <TableCell><Badge>{unit.distributor}</Badge></TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+</div>
+);
+};
+Features:
+✅ Listagem com filtros avançados (distribuidora, empresa, associação)
+✅ Relacionamento com consumidores e usinas
+✅ Endereço completo (armazenado em JSONB)
+✅ Página de detalhes com histórico de faturas
+4. Usinas Solares ☀️
+Rota: /plants
+Código:
+// src/pages/Plants.tsx
+export default function Plants() {
+const { plants, create, update } = usePlants();
+return (
+<div>
+<Table>
+<TableBody>
+{plants.map((plant) => (
+<TableRow onClick={() => navigate(/plants/${plant.id})}>
+<TableCell>
+<Sun className="h-4 w-4 text-primary" />
+{plant.name}
+</TableCell>
+<TableCell>{plant.cnpj}</TableCell>
+<TableCell><Badge>{plant.city}</Badge></TableCell>
+<TableCell>{plant.state}</TableCell>
+</TableRow>
+))}
+</TableBody>
+</Table>
+code
+Code
+<PlantDialog mode="create" onSave={create} />
+</div>
+);
+}
+Features:
+✅ Cadastro de usinas com CNPJ, localização
+✅ Página de detalhes com estatísticas
+✅ Relacionamento com unidades consumidoras
+5. Upload & Processamento de Faturas (IA) 📄🤖
+Rota: /billing/upload-invoices
+Fluxo Completo:
+Frontend (InvoiceUploadZone.tsx):
+const handleUpload = async () => {
+for (const file of files) {
+// 1. Calcula SHA256 para deduplicação
+const sha256 = await calculateSHA256(file);
+code
+Code
+// 2. Upload para Supabase Storage
+const filePath = `${session.user.id}/${Date.now()}-${file.name}`;
+await supabase.storage.from("invoices").upload(filePath, file);
+
+// 3. Cria registro na tabela invoices
+const { data: invoice } = await supabase
+  .from("invoices")
+  .upsert({
+    type: invoiceType === "solar" ? "proprietary" : "distributor",
+    storage_path: filePath,
+    sha256, // Chave única para evitar duplicatas
+    status: "uploaded",
+    reference_month, reference_year
+  }, { onConflict: "sha256", ignoreDuplicates: false })
+  .select()
+  .single();
+
+// 4. Dispara extração com IA (com retry automático)
+let retries = 0;
+while (retries < 3) {
+  const { error } = await supabase.functions.invoke("extract-invoice-data", {
+    body: { invoiceId: invoice.id, storagePath: filePath, type: invoiceType }
+  });
+  
+  if (!error) break;
+  if (error.message.includes("Rate limit")) {
+    await sleep(2 ** retries * 1000); // Exponential backoff
+    retries++;
+  } else break;
+}
+}
+};
+Backend (extract-invoice-data/index.ts):
+// supabase/functions/extract-invoice-data/index.ts
+serve(async (req) => {
+const { invoiceId, storagePath } = await req.json();
+// 1) Download PDF e converte para base64
+const pdfB64 = await downloadFileAsBase64(supabase, "invoices", storagePath);
+// 2) Chama Lovable AI (Gemini 2.5 Flash) com timeout de 120s + 2 retries
+const prompt = Extraia os seguintes campos desta fatura: { "uc_number", "distributor", "reference_month", "due_date", "amount_total", "kwh_compensated", "band" };
+const aiResponse = await withRetryAndTimeout(
+() => fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+method: "POST",
+headers: { "Authorization": Bearer ${LOVABLE_API_KEY} },
+body: JSON.stringify({
+model: "google/gemini-2.5-flash",
+messages: [{
+role: "user",
+content: [
+{ type: "text", text: prompt },
+{ type: "image_url", image_url: {
+url: data:application/pdf;base64,${pdfB64}
+}}
+]
+}]
+})
+}),
+{ maxRetries: 2, timeout: 120000 } // 120s timeout, 2 retries
+);
+const aiResult = await aiResponse.json();
+const extracted = JSON.parse(aiResult.choices[0].message.content);
+// 3) Atualiza invoice com dados extraídos
+await supabase.from("invoices").update({
+parsed: extracted,
+band: extracted.band,
+due_date: extracted.due_date,
+amount_total: extracted.amount_total,
+status: "parsed"
+}).eq("id", invoiceId);
+return json({ ok: true, parsed: extracted });
+});
+Features:
+✅ Drag & drop ou seleção múltipla
+✅ Validação (PDF/PNG/JPG/WEBP, máx 5MB)
+✅ Deduplicação via SHA256
+✅ Extração automática com IA (Gemini 2.5 Flash)
+✅ Retry automático com exponential backoff
+✅ Tratamento de rate limits (429) e créditos (402)
+✅ Timeout de 120s para arquivos grandes
+✅ Tabs separadas: Usinas / Unidades
+6. Envio de Emails em Massa ✉️
+Rota: /send-emails
+Código:
+// src/pages/SendEmails.tsx
+const SendEmails = () => {
+const [selectedBillings, setSelectedBillings] = useState<string[]>([]);
+const [emailMessage, setEmailMessage] = useState("Prezado(a) cliente...");
+const sendEmailMutation = useMutation({
+mutationFn: async (billingIds: string[]) => {
+const validRecords = billingIds
+.map(id => billingRecords.find(r => r.id === id))
+.filter(r => r?.consumer?.email?.includes("@"));
+code
+Code
+const promises = validRecords.map(record =>
+    supabase.functions.invoke("send-custom-invoice", {
+      body: {
+        invoiceId: record.invoice_id,
+        distributorInvoiceId: record.distributor_invoice_id,
+        to: [record.consumer.email],
+        customMessage: emailMessage,
+        consumer: {
+          name: record.consumer.name,
+          email: record.consumer.email,
+          cpfCnpj: record.consumer.document,
+          mobilePhone: record.consumer.phone
+        }
+      }
+    })
+  );
+  
+  return Promise.allSettled(promises);
+},
+onSuccess: (results) => {
+  const succeeded = results.filter(r => r.status === 'fulfilled').length;
+  toast({ title: `${succeeded} email(s) enviado(s)!` });
+}
+});
+return (
+<div>
+<Select value={filterStatus} onValueChange={setFilterStatus}>
+<SelectItem value="pending">Pendentes</SelectItem>
+<SelectItem value="paid">Pagos</SelectItem>
+<SelectItem value="overdue">Vencidos</SelectItem>
+</Select>
+code
+Code
+<Card>
+    {unpaidBillings.map((billing) => (
+      <div onClick={() => handleSelectBilling(billing.id)}>
+        <Checkbox checked={selectedBillings.includes(billing.id)} />
+        <span>{billing.unitName}</span>
+        <span>{formatCurrency(billing.amountDue)}</span>
+      </div>
+    ))}
+  </Card>
+  
+  <Textarea value={emailMessage} onChange={(e) => setEmailMessage(e.target.value)} />
+  <Button onClick={() => sendEmailMutation.mutate(selectedBillings)}>
+    Enviar Emails
+  </Button>
+  
+  <EmailHistoryCard />
+</div>
+);
+};
+Edge Function (send-custom-invoice):
+// supabase/functions/send-custom-invoice/index.ts
+serve(async (req) => {
+const { invoiceId, distributorInvoiceId, to, customMessage, consumer } = await req.json();
+// 1) Busca dados das faturas
+const [proprietary, distributor] = await Promise.all([
+supabase.from("invoices").select("").eq("id", invoiceId).single(),
+supabase.from("invoices").select("").eq("id", distributorInvoiceId).single()
+]);
+// 2) Baixa PDFs e converte para base64
+const enelPdfB64 = await downloadToBase64("invoices", distributor.storage_path);
+const demoPdfB64 = await downloadToBase64("invoices", proprietary.storage_path);
+// 3) Valida tamanho total (máx 25MB)
+const totalSize = ((enelPdfB64.length + demoPdfB64.length) * 3) / 4;
+if (totalSize > 25 * 1024 * 1024) {
+throw new Error(Anexos muito grandes: ${(totalSize/(1024*1024)).toFixed(2)}MB);
+}
+// 4) Envia via Resend
+const sent = await resend.sendEmail({
+from: EMAIL_FROM,
+to,
+subject: Fatura ${ref} – UC ${proprietary.parsed?.uc_number},
+html: ProInvoiceEmail({ consumer, customMessage }),
+attachments: [
+{ filename: "Fatura-Distribuidora.pdf", content: enelPdfB64 },
+{ filename: "Demonstrativo-Pro-Energia.pdf", content: demoPdfB64 }
+]
+});
+if (!sent || !sent.id) {
+throw new Error("Falha ao enviar email via Resend");
+}
+// 5) Atualiza status
+await supabase.from("billing_records").update({ status: "sent" }).eq("id", billingRecordId);
+await supabase.from("email_history").insert({ to_email: to.join(","), status: "sent" });
+return json({ ok: true, messageId: sent.id });
+});
+Features:
+✅ Seleção múltipla com checkbox
+✅ Filtros: período, status, consumidor
+✅ Mensagem personalizada
+✅ Anexo automático de 2 PDFs (distribuidora + demonstrativo)
+✅ Validação de tamanho (máx 25MB)
+✅ Histórico de envios com preview HTML
+✅ Tratamento de erros (validação de email, Resend failures)
+7. Rateios de Energia 🔀
+Rota: /apportionments
+Código:
+// src/pages/Apportionments.tsx
+export default function Apportionments() {
+const { apportionments, create, update } = useApportionments();
+return (
+<div>
+<Card>
+<CardTitle>Rateios Ativos: {stats.totalActive}</CardTitle>
+<CardTitle>Usinas com Rateio: {stats.totalPlants}</CardTitle>
+<CardTitle>Total de Consumidores: {stats.totalConsumers}</CardTitle>
+</Card>
+code
+Code
+<ApportionmentTable
+    apportionments={filteredApportionments}
+    onViewDetails={handleViewDetails}
+    onEdit={handleEdit}
+    onDuplicate={handleDuplicate}
+    onDeactivate={handleDeactivate}
+  />
+  
+  <ApportionmentDialog onSave={handleSave} />
+  <ApportionmentHistoryDialog apportionmentId={selectedId} />
+</div>
+);
+}
+Features:
+✅ Distribuição percentual de energia entre consumidores
+✅ Versionamento (valid_from / valid_to)
+✅ Status: draft, active, inactive
+✅ Histórico completo de alterações
+✅ Duplicação de rateios
+✅ Cálculo automático de totais (100%)
+8. Relatórios & Exportação 📈
+Rota: /reports
+Código:
+// src/pages/Reports.tsx
+const Reports = () => {
+const handleExport = (format: string) => {
+if (format === 'excel') {
+const exportData = records.map(r => ({
+'Unidade': r.unitName,
+'Valor': r.amountDue,
+'Vencimento': new Date(r.dueDate).toLocaleDateString("pt-BR"),
+'Status': r.status
+}));
+code
+Code
+const worksheet = XLSX.utils.json_to_sheet(exportData);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Relatório");
+  XLSX.writeFile(workbook, `relatorio-faturamento-${date}.xlsx`);
+}
+
+if (format === 'pdf') {
+  const doc = new jsPDF();
+  doc.text("Relatório de Faturamento", 14, 20);
+  doc.text(`Total de Faturas: ${totalBillings}`, 14, 35);
+  doc.text(`Valor Total: ${formatCurrency(totalValue)}`, 14, 42);
+  // ... mais detalhes
+  doc.save(`relatorio-${date}.pdf`);
+}
+};
+return (
+<div>
+<Card><CardTitle>Total de Faturas: {totalBillings}</CardTitle></Card>
+<Card><CardTitle>Valor Total: {formatCurrency(totalValue)}</CardTitle></Card>
+<Card><CardTitle>Faturas Pagas: {paidBillings}</CardTitle></Card>
+<Card><CardTitle>Faturas Vencidas: {overdueBillings}</CardTitle></Card>
+code
+Code
+<Card>
+    <CardTitle>Distribuição por Status</CardTitle>
+    {/* Gráficos de barras com percentuais */}
+  </Card>
+  
+  <Button onClick={() => handleExport("excel")}>Exportar Excel</Button>
+  <Button onClick={() => handleExport("pdf")}>Exportar PDF</Button>
+</div>
+);
+};
+Features:
+✅ Exportação Excel (XLSX.js)
+✅ Exportação PDF (jsPDF)
+✅ Gráficos de distribuição por status
+✅ Filtro por período (mês atual, último mês, últimos 3/6 meses, ano)
+✅ Detalhamento de receita
+9. Rendimento (Performance) ⚡
+Rota: /performance
+Código:
+// src/pages/Performance.tsx
+export default function Performance() {
+const { records, summary, isLoading } = usePerformance("2025-09");
+const filteredRecords = useMemo(() => {
+let data = records;
+data = filterByPlants(data, selectedPlants);
+data = filterByConsumers(data, selectedConsumers);
+data = filterByCompensationMode(data, selectedModes);
+data = searchRecords(data, searchTerm);
+return data;
+}, [records, selectedPlants, selectedConsumers, selectedModes, searchTerm]);
+return (
+<div>
+<PerformanceStatsCards summary={summary} />
+code
+Code
+<PerformanceFilters
+    selectedPlants={selectedPlants}
+    selectedModes={selectedModes}
+    onPlantsChange={setSelectedPlants}
+    onModesChange={setSelectedModes}
+  />
+  
+  <PerformanceTable records={filteredRecords} />
+</div>
+);
+}
+// src/hooks/usePerformance.ts
+export function usePerformance(referenceMonth?: string) {
+const { data: records } = useQuery({
+queryKey: ["performance-records", referenceMonth],
+queryFn: async () => {
+let query = supabase
+.from("performance_records")
+.select("*")
+.eq("created_by", session.user.id);
+code
+Code
+if (referenceMonth) {
+    query = query.eq("reference_month", referenceMonth);
+  }
+  
+  return query.order("reference_month", { ascending: false });
+},
+staleTime: 180000 // Cache 3min
+});
+const summary = {
+energyGenerated: records.reduce((acc, r) => acc + r.energy_consumed, 0),
+energyConsumed: records.reduce((acc, r) => acc + r.energy_consumed, 0),
+energyCompensated: records.reduce((acc, r) => acc + r.energy_compensated, 0),
+totalBilling: records.reduce((acc, r) => acc + r.billing, 0)
+};
+return { records, summary, isLoading };
+}
+Features:
+✅ Métricas agregadas (energia gerada/consumida/compensada, faturamento)
+✅ Filtros por usina, consumidor, modalidade
+✅ Tabela detalhada por UC
+✅ Cálculo de economia do consumidor
+10. Assistente IA 🤖
+Rota: /ai-assistant
+10.1 Processamento Genérico de Documentos (OpenAI)
+Código Frontend:
+// src/components/ai/AIDocumentProcessor.tsx
+export function AIDocumentProcessor() {
+const processFile = async (file: File) => {
+// 1) Upload para bucket "documents" (não "invoices")
+const path = ${crypto.randomUUID()}-${file.name};
+await supabase.storage.from("documents").upload(path, file);
+code
+Code
+// 2) Chama edge function process-document
+const response = await fetch(
+  `${VITE_SUPABASE_URL}/functions/v1/process-document`,
+  {
+    method: "POST",
+    body: JSON.stringify({
+      bucket: "documents",
+      path,
+      size: file.size,
+      contentType: file.type
+    })
+  }
+);
+
+const result = await response.json();
+// result = { type: "energy_invoice" | "contract" | "id_document" | "generic", confidence: 0.95 }
+};
+return (
+<Card>
+<input type="file" multiple onChange={handleFileChange} />
+<Button onClick={handleUploadAndProcess}>Enviar e Processar</Button>
+code
+Code
+{processing.map(item => (
+    <div>
+      {item.status === "success" && <CheckCircle />}
+      {item.status === "error" && <XCircle />}
+      <span>{item.fileName}</span>
+      <span>{item.message}</span>
+    </div>
+  ))}
+</Card>
+);
+}
+Edge Function:
+// supabase/functions/process-document/index.ts (resumido - 476 linhas)
+serve(async (req) => {
+const { bucket, path, size, contentType } = await req.json();
+// PROTEÇÃO CONTRA LOOPS: verifica se já está processando ou processado
+const { data: existingDocs } = await supabaseAdmin
+.from("documents")
+.select("id, processing, document_extractions(id)")
+.eq("bucket", bucket)
+.eq("path", path);
+if (existingDocs[0]?.processing) {
+return json({ ok: true, message: "Already processing" });
+}
+if (existingDocs[0]?.document_extractions?.length > 0) {
+return json({ ok: true, message: "Already processed" });
+}
+// 1) Download do storage
+const fileData = await supabaseAdmin.storage.from(bucket).download(path);
+// 2) Insere em documents com processing=true
+const { data: docRow } = await supabaseAdmin
+.from("documents")
+.insert({ bucket, path, processing: true, uploaded_by: userId })
+.select().single();
+currentProcessingDocId = docRow.id; // Para cleanup no finally
+// 3) Converte para base64
+const ab = await fileData.arrayBuffer();
+const b64 = btoa(String.fromCharCode(...new Uint8Array(ab)));
+// 4) Chama OpenAI com timeout 120s + 2 retries
+const prompt = Analise este documento e retorne: { "doc_type": "energy_invoice" | "contract" | "id_document" | "generic", "confidence": 0-1 };
+const aiResponse = await withRetryAndTimeout(
+() => fetch("https://api.openai.com/v1/chat/completions", {
+method: "POST",
+headers: { "Authorization": Bearer ${OPENAI_API_KEY} },
+body: JSON.stringify({
+model: "gpt-4o-mini",
+messages: [{
+role: "user",
+content: [
+{ type: "text", text: prompt },
+{ type: "image_url", image_url: { url: data:${contentType};base64,${b64} }}
+]
+}],
+max_completion_tokens: 500
+})
+}),
+{ maxRetries: 2, timeout: 120000 }
+);
+const result: ExtractionResult = JSON.parse(aiResponse.choices[0].message.content);
+// 5) Salva em document_extractions
+await supabaseAdmin.from("document_extractions").insert({
+document_id: docRow.id,
+doc_type: result.doc_type,
+confidence: result.confidence,
+json_data: result
+});
+// 6) FINALLY: sempre reseta processing=false (mesmo em erro)
+await supabaseAdmin
+.from("documents")
+.update({ processing: false })
+.eq("id", currentProcessingDocId);
+return json({ ok: true, type: result.doc_type, confidence: result.confidence });
+});
+Features:
+✅ Processamento genérico com OpenAI GPT-4o-mini
+✅ Classificação: energy_invoice, contract, id_document, generic
+✅ Proteção contra loops infinitos (verifica se já está processando)
+✅ Retry automático (2 tentativas) + timeout 120s
+✅ Cleanup garantido com finally block
+✅ Suporte: PDF, PNG, JPG, WEBP
+10.2 Data Copilot (SQL Natural)
+Código:
+// src/components/ai/DataCopilot.tsx
+export function DataCopilot() {
+const handleAsk = async () => {
+const response = await fetch(
+${VITE_SUPABASE_URL}/functions/v1/data-chat,
+{
+method: "POST",
+body: JSON.stringify({ question })
+}
+);
+code
+Code
+const result = await response.json();
+// result = { sql: "SELECT ...", columns: ["name", "value"], rows: [{...}] }
+
+setSql(result.sql);
+setColumns(result.columns);
+setRows(result.rows);
+};
+return (
+<Card>
+<Textarea
+value={question}
+placeholder="Ex: Qual o total faturado por distribuidora em 2024?"
+/>
+<Button onClick={handleAsk}>Perguntar</Button>
+code
+Code
+<Collapsible>
+    <CollapsibleTrigger>Ver SQL gerado</CollapsibleTrigger>
+    <CollapsibleContent>
+      <pre>{sql}</pre>
+    </CollapsibleContent>
+  </Collapsible>
+  
+  <Table>
+    <TableHeader>
+      {columns.map(col => <TableHead>{col}</TableHead>)}
+    </TableHeader>
+    <TableBody>
+      {rows.map(row => (
+        <TableRow>
+          {columns.map(col => <TableCell>{row[col]}</TableCell>)}
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+</Card>
+);
+}
+Edge Function:
+// supabase/functions/data-chat/index.ts (resumido)
+serve(async (req) => {
+const { question } = await req.json();
+// 1) Sanitização de SQL (evita UPDATE/DELETE/DROP)
+const dangerousPatterns = [
+/\bupdate\b/i, /\bdelete\b/i, /\bdrop\b/i, /\binsert\b/i,
+/\balter\b/i, /\btruncate\b/i, /\b--/
+];
+// 2) Chama Lovable AI para gerar SQL
+const prompt = Gere SQL para: "${question}". Tabelas disponíveis: consumers, units, plants, invoices, billing_records. Retorne APENAS o SQL, sem explicações.;
+const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+method: "POST",
+body: JSON.stringify({
+model: "google/gemini-2.5-flash",
+messages: [{ role: "user", content: prompt }]
+})
+});
+const sqlGenerated = aiResponse.choices[0].message.content.trim();
+// 3) Valida SQL gerado
+if (dangerousPatterns.some(pattern => pattern.test(sqlGenerated))) {
+throw new Error("SQL perigoso detectado");
+}
+// 4) Executa via função PL/pgSQL execute_sql()
+const { data } = await supabase.rpc("execute_sql", { query: sqlGenerated });
+const columns = data.length > 0 ? Object.keys(data[0]) : [];
+return json({ sql: sqlGenerated, columns, rows: data });
+});
+Features:
+✅ Consultas em linguagem natural
+✅ Geração de SQL com Lovable AI
+✅ Sanitização rigorosa (bloqueia UPDATE/DELETE/DROP)
+✅ Whitelist de tabelas
+✅ Visualização do SQL gerado
+✅ Tabela interativa com resultados
+🔐 Segurança (RLS Policies)
+Exemplo de Políticas:
+-- consumers: qualquer autenticado pode CRUD (⚠️ precisa filtrar por created_by via units)
+CREATE POLICY owner_can_select_consumers ON consumers FOR SELECT TO authenticated USING (true);
+CREATE POLICY owner_can_insert_consumers ON consumers FOR INSERT TO authenticated WITH CHECK (true);
+-- units: filtro por created_by
+CREATE POLICY owner_can_select_units ON units FOR SELECT TO authenticated
+USING (auth.uid() = created_by);
+CREATE POLICY owner_can_update_units ON units FOR UPDATE TO authenticated
+USING (auth.uid() = created_by);
+-- invoices: sem filtro (⚠️ todos autenticados veem tudo)
+CREATE POLICY invoices_select_all ON invoices FOR SELECT TO authenticated USING (true);
+CREATE POLICY invoices_update_all ON invoices FOR UPDATE TO authenticated USING (true);
+-- documents: sem filtro de usuário (⚠️ cross-user access)
+CREATE POLICY all_read_documents_table ON documents FOR SELECT TO authenticated USING (true);
+⚠️ PROBLEMAS DE SEGURANÇA IDENTIFICADOS (não corrigidos conforme solicitação):
+consumers: RLS permite acesso cross-user (deveria filtrar via units.created_by)
+documents: Sem filtro uploaded_by = auth.uid(), permite ver documentos de outros usuários
+Leaked Password Protection: Desabilitado no Supabase Auth
+📊 Performance & Otimizações
+Índices Criados (9 índices):
+-- Fase 3: Performance improvements
+CREATE INDEX idx_invoices_created_by ON invoices(created_by);
+CREATE INDEX idx_invoices_reference ON invoices(reference_year, reference_month);
+CREATE INDEX idx_documents_uploaded_by ON documents(uploaded_by);
+CREATE INDEX idx_documents_processing ON documents(processing);
+CREATE INDEX idx_billing_status ON billing_records(status);
+CREATE INDEX idx_billing_created_by ON billing_records(created_by);
+CREATE INDEX idx_performance_created_by ON performance_records(created_by);
+CREATE INDEX idx_performance_reference ON performance_records(reference_month);
+CREATE INDEX idx_units_created_by ON units(created_by);
+CREATE INDEX idx_plants_created_by ON plants(created_by);
+React Query Cache:
+// Configuração de staleTime (cache) por hook:
+useConsumers → 120s (2min)
+usePlants → 180s (3min)
+useUnits → 120s (2min)
+useInvoices → 60s (1min)
+usePerformance → 180s (3min)
+Dashboard → 30s
+// Retry automático:
+retry: 2 // Todas as queries tentam 2 vezes antes de falhar
+Query Optimization:
+// ANTES (N+1 query problem):
+.select(", invoice:invoices(, unit:units(, consumer:consumers()))")
+// DEPOIS (campos específicos):
+.select(id, created_at, status, invoice:invoices(due_date, amount_total, unit:units(uc_number)), consumer:consumers(document))
+🛠️ Edge Functions (8 funções)
+Resumo:
+extract-invoice-data → Extração de faturas com Lovable AI (Gemini)
+process-document → Processamento genérico com OpenAI
+data-chat → SQL natural com Lovable AI
+send-custom-invoice → Envio de email com 2 anexos
+send-distributor-invoice → Envio de fatura da distribuidora
+_shared/lib/clients.ts → Cliente Supabase compartilhado
+_shared/lib/storage-utils.ts → Download e base64 (deduplicated)
+_shared/lib/retry-utils.ts → withRetry, withTimeout, withRetryAndTimeout
+Bibliotecas Compartilhadas:
+// supabase/functions/shared/lib/retry-utils.ts
+export async function withRetryAndTimeout<T>(
+fn: () => Promise<T>,
+options: { maxRetries: number; timeout: number }
+): Promise<T> {
+for (let attempt = 1; attempt <= options.maxRetries; attempt++) {
+try {
+const timeoutPromise = new Promise<never>((, reject) =>
+setTimeout(() => reject(new Error("Timeout")), options.timeout)
+);
+return await Promise.race([fn(), timeoutPromise]);
+} catch (err) {
+if (attempt < options.maxRetries) {
+await new Promise(resolve => setTimeout(resolve, attempt * 3000));
+} else {
+throw err;
+}
+}
+}
+}
+// supabase/functions/_shared/lib/storage-utils.ts
+export async function downloadFileAsBase64(
+supabase: SupabaseClient,
+bucket: string,
+path: string
+): Promise<string> {
+const { data, error } = await supabase.storage.from(bucket).download(path);
+if (error) throw error;
+const ab = await data.arrayBuffer();
+return btoa(String.fromCharCode(...new Uint8Array(ab)));
+}
+🎨 UI Components (shadcn/ui)
+Componentes Principais:
+Button, Input, Textarea, Label
+Card, CardHeader, CardTitle, CardContent
+Table, TableHeader, TableBody, TableRow, TableCell
+Dialog, AlertDialog, Sheet
+Select, Checkbox, Switch, RadioGroup
+Tabs, Accordion, Collapsible
+Toast, Sonner (notificações)
+Skeleton (loading states)
+Badge, Avatar, Progress
+Pagination, Dropdown, Popover
+Calendar, DatePicker
+🔄 Fluxo Completo de Faturamento
+graph TD
+A[Upload de Fatura PDF] --> B[Cálculo SHA256]
+B --> C[Upload para Storage invoices/]
+C --> D[INSERT em invoices com status=uploaded]
+D --> E[Dispara extract-invoice-data]
+E --> F[Download PDF + Converte Base64]
+F --> G[Chamada Lovable AI Gemini 2.5 Flash]
+G --> H[Extração de dados: UC, distribuidora, valores]
+H --> I[UPDATE invoices com parsed JSONB + status=parsed]
+I --> J[Frontend: Página de Envio de Emails]
+J --> K[Usuário seleciona faturas + customiza mensagem]
+K --> L[Dispara send-custom-invoice]
+L --> M[Busca 2 faturas: proprietary + distributor]
+M --> N[Baixa PDFs + Converte Base64]
+N --> O[Validação de tamanho total < 25MB]
+O --> P[Envio via Resend com 2 anexos]
+P --> Q[INSERT em email_history]
+Q --> R[UPDATE billing_records status=sent]
+📝 Tipos TypeScript
+Principais Tipos:
+// src/types/invoice.ts
+export type InvoiceType = "solar" | "distributor" | "generation";
+export type InvoiceEntityType = "plant" | "unit";
+export interface Invoice {
+id: string;
+entityType: InvoiceEntityType;
+entityId: string;
+entityName: string;
+referenceMonth: string; // "YYYY-MM"
+invoiceType: InvoiceType;
+fileName: string;
+fileUrl: string;
+fileSize: number;
+uploadedAt: string;
+}
+// src/types/billing.ts
+export type BillingStatus = "pending" | "paid" | "overdue" | "sent" | "not_billed";
+export interface BillingRecord {
+id: string;
+unitName: string;
+clientNumber: string;
+sendDate: string;
+dueDate: string;
+amountDue: number;
+status: BillingStatus;
+solarBillUrl: string;
+distributorBillUrl: string;
+}
+// src/types/consumer.ts
+export interface Consumer {
+id: string;
+name: string;
+email?: string | null;
+phone?: string | null;
+document?: string | null;
+created_at?: string;
+}
+🚀 Como Funciona na Prática
+Fluxo do Usuário:
+Login → /auth (Supabase Auth)
+Dashboard → Vê métricas gerais, faturas recentes, alertas
+Cadastros → Cria consumidores, unidades, usinas
+Upload de Faturas → /billing/upload-invoices
+Arrasta PDF da ENEL
+Seleciona UC, mês de referência, tipo
+IA extrai automaticamente: valor, vencimento, kWh, bandeira
+Envio de Emails → /send-emails
+Filtra faturas pendentes
+Seleciona múltiplas faturas
+Customiza mensagem
+Envia em lote com 2 anexos (ENEL + Demonstrativo)
+Relatórios → /reports
+Visualiza estatísticas
+Exporta Excel/PDF
+🎯 Diferenciais do Sistema
+✅ IA Integrada: Extração automática de dados de faturas (sem digitação manual)
+✅ Multi-tenant: Cada usuário vê apenas seus dados (RLS)
+✅ Escalável: Supabase Cloud + Edge Functions serverless
+✅ Performance: Cache inteligente, índices otimizados, retry automático
+✅ Email Transacional: Resend com anexos múltiplos
+✅ Deduplicação: SHA256 evita uploads duplicados
+✅ Error Handling: Tratamento de rate limits, timeouts, créditos
+✅ UX Moderno: shadcn/ui + Tailwind CSS
